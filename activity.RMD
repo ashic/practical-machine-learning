@@ -1,0 +1,167 @@
+---
+title: "Activity Monitoring"
+author: "Ashic Mahtab"
+date: "Thursday, January 22, 2015"
+output: html_document
+---
+
+## Introduction
+
+This is a report that describes work carried out applying machine learning to a Weight Lifting Exercises dataset (available [here](http://groupware.les.inf.puc-rio.br/har)). The dataset focuses on how "well" certain physical exercises are being carried out by wearers of monitoring devices. Given a large number of readings, we are to predict the quality of execution of users in unseen data. This is an exercise in supervised learning.
+
+## The Data
+
+```{r echo=FALSE, cache=TRUE}
+library(caret)
+library(randomForest)
+
+prepareData <- function(){
+    trainingFile <- 'pml-training.csv'
+    testingFile <- 'pml-testing.csv'
+    
+    if(!file.exists(trainingFile)){
+        tryCatch(
+            download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', destfile=trainingFile)
+            , error = function(e){
+                download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', destfile=trainingFile, method='wget')
+            }
+        )   
+    }
+    
+    
+    if(!file.exists(testingFile)){
+        tryCatch(
+            download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', destfile=testingFile)
+            , error = function(e){
+                download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', destfile=testingFile, method='wget')
+            }
+        )   
+    }
+    
+    fullTraining <<- read.csv('pml-training.csv')
+    finalTest <<- read.csv('pml-testing.csv')
+    
+    inTraining <- fullTraining
+    
+    LL <- c(1:7)
+    
+    for(i in 8:ncol(inTraining))
+    {
+      if(sum(!is.na(inTraining[, i]) && inTraining[,i] != '') == 0)
+      {
+        LL <- append(LL, i)
+      }
+    }
+    
+    totalTraining <<- inTraining[, -LL]
+    totalTesting <<- finalTest[, -LL]
+}
+
+prepareData()
+
+print(paste('Training Set: ', dim(fullTraining)[1], ", ", dim(fullTraining)[2]))
+print(paste('Testing Set: ', dim(finalTest)[1], ", ", dim(finalTest)[2]))
+print(paste('Reduced Training Set: ', dim(totalTraining)[1], ", ", dim(totalTraining)[2]))
+print(paste('Reduced Testing Set: ', dim(totalTesting)[1], ", ", dim(totalTesting)[2]))
+
+```
+We are provided a training dataset of 19622 rows and 160 columns. Some of these columns do not correspond to readings, and some have missing values for all rows. These columns are discarded. After cleaning up the data, we have 53 columns. 52 of those are predictors, while the last is the outcome (classe) in case of the training set, and the problem id in case of the test set.
+
+As we can see, the number of columns is numerous, even after cleaning. There are too many to make sense of a single pairs plot. We will try out some simple models, and only if they seem unhelpful will we proceed to principle component anaylisis or some other form of dimensionality reduction. As a first step, we try a stepwise method, however that hardly reduces the dimensions at all. As such, we decide to start off with all 52 predictors of the cleaned up dataset.
+
+
+## Choosing a Model
+
+We start by splitting the full training set into training, cross validation and test sets. This will help us predict the out of model error, detect it, and either reject our model or give us confidence that it may work well.
+
+After experimenting with a few models like gbm, linear svm, etc., we found random forests with around 4 attributes per forest to be quite accurate, while maintaining good performance. We performed 10 fold cross validation to get some understanding of how it might perform with out of sample data.
+
+```{r cache=TRUE}
+set.seed(123)
+inTrain <- createDataPartition(totalTraining$classe, p=0.9, list=F)
+training <- totalTraining[inTrain, ]
+holdout <- totalTraining[-inTrain, ]
+
+folds <- createFolds(training$classe, k=10)
+
+
+getConfusionMatrix <- function(fold){
+    myTrain <- training[fold, ]
+    myCrossValidation <- training[-fold, ]
+
+    fit <- randomForest(myTrain[, -53], myTrain$classe, mtry=4)
+    p <- predict(fit, myCrossValidation)
+    confusionMatrix(myCrossValidation$classe, p)
+}
+
+
+accuracies <- vector()
+sensitivities <- vector()
+specificities <- vector()
+
+for(i in 1:10){
+   cm <- getConfusionMatrix(folds[[i]])
+   accuracies <- c(accuracies, cm$overall["Accuracy"])
+   sensitivities <- c(sensitivities, sum(cm$byClass[, 1]) / 5)
+   specificities <- c(specificities, sum(cm$byClass[, 2]) / 5)
+}
+
+avgAccuracy <- sum(accuracies) / 10
+avgSensitivity <- sum(sensitivities) / 10
+avgSpecifity <- sum(specificities) / 10
+
+```
+
+The average accuracy for the model is `r avgAccuracy`, the average sensitivity is `r avgSensitivity`, and the average specificity is `r avgSpecifity`. For out of sample errors, we can expect similar numbers with similar bias, but with some more variance (as we used a relatively high value of k=10). Given that the training set is considerably large, with 19,000+ inputs, we can be satisfied with this.
+
+## Building the Model
+
+Now that the model has been chosen, we can take the entire training set (minus the hold-out), and test it against our hold out data set.
+
+```{r cache=TRUE}
+fit <- randomForest(training[, -53], training$classe, mtry=4)
+pFit <- predict(fit, holdout)
+confusionMatrix(holdout$classe, pFit)
+```
+
+We can see that the model performs quite well against the hold out set.
+
+## Building the Final Model
+With the model validated against the hold out set, we can build our final model against the entire training set provided. We then predict on the test set.
+
+```{r cache=TRUE}
+fit2 <- randomForest(totalTraining[, -53], totalTraining$classe, mtry=4)
+pFit2 <- predict(fit2, totalTesting)
+```
+
+## Submission Files
+We generate the submission files. 
+
+```{r cache=TRUE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(pFit2)
+```
+
+The autograder sees that all of the results are correct.
+
+## Model Summary
+Our final model, fit2 is summaried bellow:
+
+```{r cache=TRUE}
+fit2
+```
+
+We see that the OOB error rate estimate is 0.31%.
+
+We can also see that the error rate drops considerably as the number of trees used increases from zero, however, it can do pretty well with even a few trees. Around the 20-25 tree mark, the error rate drops to almost zero, and plataues out. 
+
+```{r cache=TRUE}
+plot(fit2)
+```
